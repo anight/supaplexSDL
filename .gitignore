@@ -1,0 +1,15 @@
+# build products
+*.o
+picosupaplex
+
+# the original game is copyrighted: bring your own
+orig/
+*.DAT
+*.SND
+*.BIN
+*.LST
+*.EXE
+*.zip
+
+# reverse-engineering workspace (kept locally, not published)
+re/
