@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "asset.h"
 
 /* ---- screen geometry (VGA mode 320x200, 16 colours) ---- */
 #define SCR_W        320
@@ -44,8 +45,9 @@ enum {
  * Glyph index = character - 0x20 (so it covers ' ' .. '_'). ---- */
 typedef struct { uint8_t bits[8][512]; } Font;
 
-/* ---- an indexed (palette) image ---- */
-typedef struct { int w, h; uint8_t *px; } Image;
+/* ---- an indexed (palette) image.  `owned` says px is heap memory; when it
+ * is not, px may point at read-only data in flash and is never written. ---- */
+typedef struct { int w, h; uint8_t *px; bool owned; } Image;
 
 /* ---- one palette: 16 RGB entries, already expanded to 8 bit ---- */
 typedef struct { uint8_t r[16], g[16], b[16]; } Palette;
@@ -71,13 +73,17 @@ typedef struct {
     Image   panel;             /* 320x24  : status panel background       */
     Image   title, title1, title2, menu, back, gfx, controls;   /* 320x200 */
     Font    chars6, chars8;    /* bitmap fonts                            */
-    Level   levels[NUM_LEVELS];
+    Asset   levels_dat;        /* LEVELS.DAT as it is; see sp_level()     */
+    int     n_levels;
     char    level_names[NUM_LEVELS][28];
+    uint8_t border_px[3][256];
 } GameData;
 
 /* data.c */
 bool  sp_load_all(GameData *gd, const char *dir);
 void  sp_free_all(GameData *gd);
+bool  sp_level(const GameData *gd, int index, Level *out);   /* 0-based */
+void  sp_parse_level(const uint8_t *raw, Level *out);        /* 1536 bytes */
 bool  sp_decode_planar(const uint8_t *data, size_t len, int w, int h, Image *out);
 
 /* render.c */

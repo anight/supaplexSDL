@@ -27,6 +27,7 @@
  */
 #include "music.h"
 #include "opl/opl.h"
+#include "asset.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,8 @@ typedef struct {
     int8_t   detune, transpose;
 } Chan;
 
-static uint8_t *snd;
+static Asset    snd_asset;
+static const uint8_t *snd;
 static size_t   snd_len;
 static Chan     chan[CHANNELS];
 static uint8_t  tempo, tempo_acc;
@@ -69,22 +71,18 @@ static uint8_t rd8(uint16_t off)
 
 bool music_load(const char *datadir)
 {
-    char path[512];
-    snprintf(path, sizeof path, "%s/ADLIB.SND", datadir);
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    if (n < SONGS + 22) { fclose(f); return false; }
-    snd = malloc((size_t)n);
-    if (!snd || fread(snd, 1, (size_t)n, f) != (size_t)n) {
-        free(snd); snd = NULL; fclose(f); return false;
-    }
-    fclose(f);
-    snd_len = (size_t)n;
+    if (!sp_asset_open(datadir, "ADLIB.SND", &snd_asset)) return false;
+    if (snd_asset.len < SONGS + 22) { sp_asset_release(&snd_asset); return false; }
+    snd = snd_asset.data;
+    snd_len = snd_asset.len;
     return true;
 }
 
-void music_free(void) { free(snd); snd = NULL; snd_len = 0; playing = false; }
+void music_free(void)
+{
+    sp_asset_release(&snd_asset);
+    snd = NULL; snd_len = 0; playing = false;
+}
 
 bool music_playing(void) { return playing; }
 

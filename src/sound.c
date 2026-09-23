@@ -10,19 +10,23 @@
  * with the rate.  The timer runs at 1193182/66 = 18078.5 Hz and the sample
  * pointer advances whenever that addition carries, so the real sample rate is
  * 18078.5 * rate/256 = 8333 Hz for every effect.  Samples are 6-bit unsigned
- * (0..63) written to the PC speaker's PWM counter.
+ * (0..63) written to the PC speaker's PWM counter.  They are played straight
+ * out of the file's bytes, which on a microcontroller are in flash.
  *
  * The music is a port of ADLIB.SND driving an emulated OPL2; see music.c.
  * The game's PIT runs at 1193182/23864 = 50 Hz (46c2:080a) and its timer
  * interrupt calls the driver's tick (AH=1) on every one of those, so the
  * mixer steps the sequencer every out_rate/50 samples.
+ *
+ * The output is 16-bit stereo, both channels the same: it is all the audio
+ * layer of a small SDL subset offers, and plain SDL is happy with it too.
  */
 #include "sound.h"
 #include "music.h"
+#include "asset.h"
 #include "opl/opl.h"
 #include <SDL2/SDL.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define TABLE_OFFSETS 0x8d94
@@ -33,15 +37,19 @@
  * music come out at the level the original is heard at.  The effects are
  * pulled down a little so the two together leave some headroom. */
 #define MUSIC_GAIN    2
-#define OUT_RATE      44100
-#define CHUNK         512
+#define SFX_GAIN      500
+#ifndef SP_AUDIO_RATE
+#define SP_AUDIO_RATE 44100
+#endif
+#define CHUNK         256
 
-typedef struct { int16_t *pcm; int len; } Sample;
+typedef struct { const uint8_t *raw; int len; } Sample;
 
-static Sample  samples[SFX_COUNT];
-static int     sfx_hz = 8333;
-static int     out_rate = OUT_RATE;
-static SDL_AudioDeviceID dev;
+static Asset    sample_snd;
+static Sample   samples[SFX_COUNT];
+static int      sfx_hz = 8333;
+static int      out_rate = SP_AUDIO_RATE;
+static bool     opened;
 static volatile int cur = -1;       /* the original plays one effect at a time */
 static uint32_t sfx_pos, sfx_step;  /* 16.16 cursor into the current effect */
 static int      tick_left;
@@ -52,7 +60,7 @@ static void mix(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
     int16_t *out = (int16_t *)stream;
-    int n = len / 2;
+    int n = len / 4;                               /* stereo frames */
 
     while (n > 0) {
         if (have_music && tick_left <= 0) {
@@ -73,43 +81,32 @@ static void mix(void *ud, Uint8 *stream, int len)
             if (s >= 0) {
                 uint32_t idx = sfx_pos >> 16;
                 if ((int)idx < samples[s].len) {
-                    v += samples[s].pcm[idx];
+                    v += ((samples[s].raw[idx] & 0x3f) - 32) * SFX_GAIN;
                     sfx_pos += sfx_step;
                 } else cur = -1;
             }
             if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
-            out[i] = (int16_t)v;
+            out[2 * i] = out[2 * i + 1] = (int16_t)v;
         }
-        out += k; n -= k; tick_left -= k;
+        out += 2 * k; n -= k; tick_left -= k;
     }
 }
 
 static bool load_samples(const char *datadir)
 {
-    char path[512];
-    snprintf(path, sizeof path, "%s/SAMPLE.SND", datadir);
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *d = malloc((size_t)n);
-    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); fclose(f); return false; }
-    fclose(f);
-    if (n < TABLE_RATES + SFX_COUNT) { free(d); return false; }
+    if (!sp_asset_open(datadir, "SAMPLE.SND", &sample_snd)) return false;
+    const uint8_t *d = sample_snd.data;
+    long n = (long)sample_snd.len;
+    if (n < TABLE_RATES + SFX_COUNT) { sp_asset_release(&sample_snd); return false; }
 
     for (int i = 0; i < SFX_COUNT; i++) {
         int a = d[TABLE_OFFSETS + i*2] | (d[TABLE_OFFSETS + i*2 + 1] << 8);
         int b = d[TABLE_OFFSETS + i*2 + 2] | (d[TABLE_OFFSETS + i*2 + 3] << 8);
         if (a <= 0 || b <= a || b > n) continue;
-        int len = b - a - 1;                     /* last byte holds the terminator */
-        samples[i].pcm = malloc((size_t)len * sizeof(int16_t));
-        samples[i].len = len;
-        for (int k = 0; k < len; k++) {
-            int v = d[a + k] & 0x3f;             /* 6-bit unsigned */
-            samples[i].pcm[k] = (int16_t)((v - 32) * 500);
-        }
+        samples[i].raw = d + a;
+        samples[i].len = b - a - 1;              /* last byte holds the terminator */
         if (i == 0) sfx_hz = (int)(TIMER_HZ * d[TABLE_RATES] / 256.0 + 0.5);
     }
-    free(d);
     return true;
 }
 
@@ -120,39 +117,43 @@ bool sound_init(const char *datadir, bool music)
     if (!have_sfx && !have_music) return false;
 
     SDL_AudioSpec want, have;
-    SDL_zero(want);
-    want.freq = OUT_RATE; want.format = AUDIO_S16SYS;
-    want.channels = 1;    want.samples = 1024; want.callback = mix;
-    dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-    if (!dev) { fprintf(stderr, "audio: %s\n", SDL_GetError()); return false; }
+    memset(&want, 0, sizeof want);
+    want.freq = SP_AUDIO_RATE; want.format = AUDIO_S16SYS;
+    want.channels = 2;         want.samples = 1024; want.callback = mix;
+    if (SDL_OpenAudio(&want, &have) != 0) {
+        fprintf(stderr, "audio: %s\n", SDL_GetError());
+        return false;
+    }
+    opened = true;
     out_rate = have.freq;
     sfx_step = (uint32_t)(((double)sfx_hz / out_rate) * 65536.0 + 0.5);
     tick_left = out_rate / MUSIC_HZ;
     if (have_music) opl_init(out_rate);
-    SDL_PauseAudioDevice(dev, 0);
+    SDL_PauseAudio(0);
     return true;
 }
 
 void sound_music(int song)
 {
-    if (!dev || !have_music) return;
-    SDL_LockAudioDevice(dev);
+    if (!opened || !have_music) return;
+    SDL_LockAudio();
     if (song < 0) music_stop(); else music_start(song);
-    SDL_UnlockAudioDevice(dev);
+    SDL_UnlockAudio();
 }
 
 void sp_sound_play(int fx)
 {
-    if (!dev || fx < 0 || fx >= SFX_COUNT || !samples[fx].pcm) return;
-    SDL_LockAudioDevice(dev);
+    if (!opened || fx < 0 || fx >= SFX_COUNT || !samples[fx].raw) return;
+    SDL_LockAudio();
     cur = fx; sfx_pos = 0;
-    SDL_UnlockAudioDevice(dev);
+    SDL_UnlockAudio();
 }
 
 void sound_quit(void)
 {
-    if (dev) SDL_CloseAudioDevice(dev);
-    dev = 0;
-    for (int i = 0; i < SFX_COUNT; i++) { free(samples[i].pcm); samples[i].pcm = NULL; }
+    if (opened) SDL_CloseAudio();
+    opened = false;
+    memset(samples, 0, sizeof samples);
+    sp_asset_release(&sample_snd);
     music_free();
 }
