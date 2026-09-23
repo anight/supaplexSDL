@@ -4,7 +4,7 @@
  * INT 80h with the command in AH and the OPL base port in DX; the
  * decompilation is in re/ghidra_snd/.  Only the music side is ported here -
  * the driver's own sound effects (AH=4) are unused because picosupaplex
- * plays the digitised ones from SAMPLE.SND instead.
+ * plays the digitised ones from BLASTER.SND instead.
  *
  * Five melodic OPL2 channels, each running a byte stream:
  *

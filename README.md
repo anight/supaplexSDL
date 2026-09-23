@@ -15,7 +15,7 @@ its data files into a directory — `orig/` by default:
 orig/
   FIXED.DAT  MOVING.DAT  PANEL.DAT  PALETTES.DAT  LEVELS.DAT  LEVEL.LST
   TITLE.DAT  TITLE1.DAT  TITLE2.DAT MENU.DAT  BACK.DAT  GFX.DAT  CONTROLS.DAT
-  CHARS6.DAT CHARS8.DAT  BLASTER.SND SAMPLE.SND  ADLIB.SND  SUPAPLEX.CFG
+  CHARS6.DAT CHARS8.DAT  BLASTER.SND ADLIB.SND   SUPAPLEX.CFG
   DEMO0.BIN ... DEMO9.BIN            (only for --replay)
 ```
 
@@ -359,23 +359,14 @@ reproducible, and no demo can depend on them.
 
 ## Sound
 
-`SAMPLE.SND` (and its siblings) are loadable 8086 driver blobs with the sample
-data appended, which the game calls through `INT 80h` / `INT 81h`. The sample
-driver's handler dispatches on `AH` through a table at offset 0x18; `AH=0`
-plays effect `AL`, reading
-
-```
-start = word[0x8d94 + AL*2]      end = word[0x8d96 + AL*2]
-rate  = byte[0x8da4 + AL]
-```
-
-writing a 0xFF terminator at `end-1` and patching the immediate of
-`add byte [0x15e], imm8` at offset 0x10c with the rate. The timer runs at
-1193182/66 = 18078.5 Hz and the sample pointer advances only when that addition
-carries, so the real rate is `18078.5 * rate/256` = **8333 Hz** for every
-effect. Samples are 6-bit unsigned, written to the PC speaker's PWM counter.
-
-That yields seven effects, and the call sites in the game name them:
+The `.SND` files are loadable 8086 driver overlays, one per sound device, which
+the game calls through `INT 80h` / `INT 81h`; `SUPAPLEX.CFG` picks which are
+loaded. The shipped one selects the Sound Blaster, and the game then plays its
+effects from `BLASTER.SND`: Creative's CT-VOICE driver with seven Creative
+Voice Files appended. A word table at `0x8fa8` holds their offsets, and the
+play routine (`AH=0`, effect in `AL`) skips each file's header by its own
+header-size field at `+0x14`. Each is one type-1 block of **8-bit unsigned PCM
+at 8333 Hz**, and the call sites in the game name them:
 
 | # | length | event | called from |
 |---|--------|-------|-------------|
@@ -387,22 +378,14 @@ That yields seven effects, and the call sites in the game name them:
 | 5 | 0.01 s | base eaten | `FUN_46c2_6ec4` |
 | 6 | 1.80 s | exit reached | `FUN_46c2_6f2d` |
 
-picosupaplex decodes them at load time and plays them through SDL2 audio, one
-at a time as the original does. `re/out/sfx/` holds them as WAV files.
+supaplexSDL plays them straight out of the file's bytes, one at a time as the
+original does.
 
-### Which set is played, and when
-
-The shipped `SUPAPLEX.CFG` selects the Sound Blaster, and with it the game
-plays its effects from `BLASTER.SND`, not `SAMPLE.SND`. That file is Creative's
-CT-VOICE driver with seven Creative Voice Files appended; a word table at
-`0x8fa8` holds their offsets, and the play routine skips each file's header by
-its own header-size field at `+0x14`. Each is one type-1 block of **8-bit
-unsigned PCM at 8333 Hz** — the same seven sounds, cleanly: centred on 128,
-where the speaker set sits on a large DC offset (its values run 0–60, mean
-about 34) that clicks at every start and stop, and is otherwise a PWM duty
-approximation made for a paper cone to smooth. Played through a DAC the
-speaker set is harsh, so supaplexSDL uses the Blaster set and falls back to
-the speaker one only if `BLASTER.SND` is missing.
+`SAMPLE.SND`, the PC speaker's driver, carries the same seven sounds as 6-bit
+PWM duty values (start and end words at `0x8d94`, a rate byte at `0x8da4`,
+played by an 18078.5 Hz timer to the same 8333 Hz). They sit on a large DC
+offset and are an approximation made for a paper cone to smooth; through a DAC
+they are harsh and click at every start and stop, so they are not used.
 
 An effect does not simply cut off whatever is playing. Every trigger
 (46c2:6cb7…6ec4) checks a priority byte at `DS:9579` against a gate, and if it
@@ -420,7 +403,7 @@ interrupt counts down (46c2:0782) before clearing the priority:
 
 Reaching the exit (46c2:6f2d) also stops the music and plays effect 6 in its
 place. The Adlib driver's own jingle, song 1, is what the pure-Adlib setup
-plays there instead; supaplexSDL uses it only if it has no digitised effects.
+plays there instead; supaplexSDL uses it only without `BLASTER.SND`.
 
 ## Music
 

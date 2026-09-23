@@ -1,27 +1,17 @@
-/* Audio: the digitised effects from SAMPLE.SND and the Adlib music from
+/* Audio: the digitised effects from BLASTER.SND and the Adlib music from
  * ADLIB.SND, mixed into one SDL stream.
  *
- * SAMPLE.SND is a loadable 8086 driver blob with the sample data appended.
- * Its INT handler dispatches on AH through a table at offset 0x18; AH=0 plays
- * effect AL.  That routine reads
- *     start = word[0x8d94 + AL*2],  end = word[0x8d96 + AL*2]
- *     rate  = byte[0x8da4 + AL]
- * writes a 0xFF terminator at end-1, and patches `add [0x15e], imm8` at 0x10c
- * with the rate.  The timer runs at 1193182/66 = 18078.5 Hz and the sample
- * pointer advances whenever that addition carries, so the real sample rate is
- * 18078.5 * rate/256 = 8333 Hz for every effect.  Samples are 6-bit unsigned
- * (0..63) written to the PC speaker's PWM counter.
- *
- * Those are the fallback.  The effects are taken from BLASTER.SND when it is
- * there: the same seven sounds as proper 8-bit PCM, which is what the game
- * plays with the Sound Blaster the shipped SUPAPLEX.CFG selects.  Either way
- * they are played straight out of the file's bytes, which on a
+ * The shipped SUPAPLEX.CFG selects the Sound Blaster, and the game then plays
+ * its effects from BLASTER.SND: Creative's CT-VOICE driver with seven
+ * Creative Voice Files appended, each one block of 8-bit unsigned PCM at
+ * 8333 Hz.  They are played straight out of the file's bytes, which on a
  * microcontroller are in flash, under the original's priority rules.
  *
  * The music is a port of ADLIB.SND driving an emulated OPL2; see music.c.
  * The game's PIT runs at 1193182/23864 = 50 Hz (46c2:080a) and its timer
  * interrupt calls the driver's tick (AH=1) on every one of those, so the
- * mixer steps the sequencer every out_rate/50 samples.
+ * mixer steps the sequencer every out_rate/50 samples.  The same interrupt
+ * counts down how long an effect holds its priority.
  *
  * The output is 16-bit stereo, both channels the same: it is all the audio
  * layer of a small SDL subset offers, and plain SDL is happy with it too.
@@ -34,25 +24,25 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SPK_OFFSETS   0x8d94        /* SAMPLE.SND: start/end words        */
-#define SPK_RATES     0x8da4        /* SAMPLE.SND: per-effect rate byte   */
-#define SPK_TIMER_HZ  (1193182.0 / 66.0)
-#define SB_VOCS       0x8fa8        /* BLASTER.SND: offsets of 7 VOC files */
-#define MUSIC_HZ      50            /* PIT divisor 0x5d38 */
+#define VOC_TABLE     0x8fa8        /* BLASTER.SND: offsets of the 7 VOC files */
+#define TIMER_HZ      50            /* PIT divisor 0x5d38 */
 /* DOSBox gives its Adlib mixer channel a scale of 2.0 and the Sound
  * Blaster's 8-bit DAC a shift of 8, which leaves no room for the two at
  * once.  These keep their balance - effects on top of the music - at about
  * three quarters of that, so they only clip when both peak together. */
-#define MUSIC_GAIN_Q4 6             /* x1.5 */
+#define MUSIC_GAIN_Q2 6             /* x1.5 */
 #define SFX_GAIN      128           /* per step of an 8-bit sample */
 #ifndef SP_AUDIO_RATE
 #define SP_AUDIO_RATE 44100
 #endif
 #define CHUNK         256
 
-/* 8-bit unsigned samples centred on 128; speaker ones are converted on the
- * fly from their 6-bit values, which is what `shift` is for. */
-typedef struct { const uint8_t *raw; int len, rate, shift; uint8_t centre; } Sample;
+typedef struct {
+    const uint8_t *pcm;             /* 8-bit unsigned, centred on 128 */
+    int            len;
+    int            rate;
+    uint32_t       step;            /* 16.16 source samples per output frame */
+} Sample;
 
 /* 46c2:6cb7..6ec4 and 6f2d: an effect starts only if the one playing has a
  * lower priority than its gate; it then holds the priority for `hold` ticks
@@ -67,26 +57,19 @@ static const struct { uint8_t gate, prio, hold; } RULE[SFX_COUNT] = {
     [SFX_EXIT]     = { 255, 10, 250 },
 };
 
-static Asset    fx_asset;
-static bool     fx_blaster;
+static Asset    blaster;
 static Sample   samples[SFX_COUNT];
 static int      out_rate = SP_AUDIO_RATE;
-static bool     opened;
-static volatile int cur = -1;       /* the original plays one effect at a time */
-static uint32_t sfx_pos, sfx_step;  /* 16.16 cursor into the current effect */
-static uint8_t  sfx_prio, sfx_hold; /* DS:9579 and DS:957b                  */
-static int      tick_left;
-static bool     have_music;
+static bool     opened, have_music;
+static int      tick_left;          /* output frames until the next timer tick */
+
+/* the effect playing: the original plays one at a time */
+static volatile int cur = -1;
+static uint32_t sfx_pos;            /* 16.16 cursor into it                   */
+static uint8_t  sfx_prio, sfx_hold; /* DS:9579 and DS:957b                    */
+
 static int32_t  oplbuf[CHUNK];
 static volatile SoundStats stats;
-
-void sound_stats(SoundStats *out, bool reset)
-{
-    SDL_LockAudio();
-    *out = *(const SoundStats *)&stats;
-    if (reset) memset((void *)&stats, 0, sizeof stats);
-    SDL_UnlockAudio();
-}
 
 /* The game's 50 Hz timer: the music's tick and the effect priority's. */
 static void timer_tick(void)
@@ -99,17 +82,15 @@ static void mix(void *ud, Uint8 *stream, int len)
 {
     (void)ud;
     int16_t *out = (int16_t *)stream;
-    int n = len / 4;                               /* stereo frames */
+    int frames = len / 4;                          /* stereo frames */
     Uint64 t0 = SDL_GetPerformanceCounter();
-    int frames = n;
 
-    while (n > 0) {
+    for (int n = frames; n > 0; ) {
         if (tick_left <= 0) {
             timer_tick();
-            tick_left = out_rate / MUSIC_HZ;
+            tick_left = out_rate / TIMER_HZ;
         }
-        int k = n;
-        if (k > CHUNK) k = CHUNK;
+        int k = n < CHUNK ? n : CHUNK;
         if (k > tick_left) k = tick_left;
 
         if (have_music) {
@@ -117,14 +98,14 @@ static void mix(void *ud, Uint8 *stream, int len)
             opl_render(oplbuf, k);
         }
         for (int i = 0; i < k; i++) {
-            int32_t v = have_music ? (oplbuf[i] * MUSIC_GAIN_Q4) >> 2 : 0;
+            int32_t v = have_music ? (oplbuf[i] * MUSIC_GAIN_Q2) >> 2 : 0;
             int s = cur;
             if (s >= 0) {
                 const Sample *sm = &samples[s];
                 uint32_t idx = sfx_pos >> 16;
                 if ((int)idx < sm->len) {
-                    v += (((int)sm->raw[idx] << sm->shift) - sm->centre) * SFX_GAIN;
-                    sfx_pos += sfx_step;
+                    v += ((int)sm->pcm[idx] - 128) * SFX_GAIN;
+                    sfx_pos += sm->step;
                 } else cur = -1;
             }
             if (v > 32767 || v < -32768) {
@@ -145,54 +126,36 @@ static void mix(void *ud, Uint8 *stream, int len)
     if (cur >= 0) stats.sfx_blocks++;
 }
 
-/* BLASTER.SND carries Creative's CT-VOICE driver and, at SB_VOCS, the
- * offsets of seven Creative Voice Files - the effects the game plays when
- * SUPAPLEX.CFG says Sound Blaster, as the shipped one does.  Each has one
- * type-1 block: 8-bit unsigned PCM at 1000000/(256-tc) Hz, 8333 for all. */
-static bool load_blaster(const char *datadir)
+/* The word table at VOC_TABLE gives each Creative Voice File's offset; the
+ * play routine skips the file's header by its own size field at +0x14 and
+ * hands the first block to the driver.  That block is type 1: a 3-byte
+ * length, a time constant (rate = 1000000 / (256 - tc)), a codec byte (0 for
+ * 8-bit unsigned PCM), then the samples. */
+static bool load_effects(const char *datadir)
 {
-    if (!sp_asset_open(datadir, "BLASTER.SND", &fx_asset)) return false;
-    const uint8_t *d = fx_asset.data;
-    size_t n = fx_asset.len;
+    if (!sp_asset_open(datadir, "BLASTER.SND", &blaster)) return false;
+    const uint8_t *d = blaster.data;
+    size_t n = blaster.len;
     int found = 0;
-    for (int i = 0; n > SB_VOCS + 16 && i < SFX_COUNT; i++) {
-        size_t o = d[SB_VOCS + 2*i] | (d[SB_VOCS + 2*i + 1] << 8);
+    for (int i = 0; n > VOC_TABLE + 2 * SFX_COUNT && i < SFX_COUNT; i++) {
+        size_t o = d[VOC_TABLE + 2*i] | (d[VOC_TABLE + 2*i + 1] << 8);
         if (o + 0x1a > n || memcmp(d + o, "Creative Voice File", 19) != 0) continue;
         size_t p = o + (d[o + 0x14] | (d[o + 0x15] << 8));
-        if (p + 6 > n || d[p] != 1) continue;
+        if (p + 6 > n || d[p] != 1 || d[p + 5] != 0) continue;
         size_t blen = d[p+1] | (d[p+2] << 8) | ((size_t)d[p+3] << 16);
-        if (blen < 2 || p + 4 + blen > n || d[p+5] != 0) continue;   /* 8-bit PCM */
-        samples[i] = (Sample){ d + p + 6, (int)(blen - 2), 1000000 / (256 - d[p+4]), 0, 128 };
+        if (blen < 2 || p + 4 + blen > n) continue;
+        samples[i].pcm  = d + p + 6;
+        samples[i].len  = (int)(blen - 2);
+        samples[i].rate = 1000000 / (256 - d[p + 4]);
         found++;
     }
-    if (!found) { sp_asset_release(&fx_asset); return false; }
-    fx_blaster = true;
-    return true;
-}
-
-/* SAMPLE.SND, the PC speaker's: see the top of the file.  Kept for a copy of
- * the game without BLASTER.SND.  Its 6-bit PWM duty values are only an
- * approximation of the sound, made for a paper cone to smooth, and are
- * harsh through a DAC. */
-static bool load_speaker(const char *datadir)
-{
-    if (!sp_asset_open(datadir, "SAMPLE.SND", &fx_asset)) return false;
-    const uint8_t *d = fx_asset.data;
-    long n = (long)fx_asset.len;
-    if (n < SPK_RATES + SFX_COUNT) { sp_asset_release(&fx_asset); return false; }
-    int rate = (int)(SPK_TIMER_HZ * d[SPK_RATES] / 256.0 + 0.5);
-    for (int i = 0; i < SFX_COUNT; i++) {
-        int a = d[SPK_OFFSETS + i*2] | (d[SPK_OFFSETS + i*2 + 1] << 8);
-        int b = d[SPK_OFFSETS + i*2 + 2] | (d[SPK_OFFSETS + i*2 + 3] << 8);
-        if (a <= 0 || b <= a || b > n) continue;
-        samples[i] = (Sample){ d + a, b - a - 1, rate, 2, 128 };  /* 0..63 -> 0..252 */
-    }
-    return true;
+    if (!found) sp_asset_release(&blaster);
+    return found > 0;
 }
 
 bool sound_init(const char *datadir, bool music)
 {
-    bool have_sfx = load_blaster(datadir) || load_speaker(datadir);
+    bool have_sfx = load_effects(datadir);
     have_music = music && music_load(datadir);
     if (!have_sfx && !have_music) return false;
 
@@ -211,11 +174,20 @@ bool sound_init(const char *datadir, bool music)
     opened = true;
     out_rate = have.freq;
     if (have_music && out_rate != SP_AUDIO_RATE) opl_init(out_rate);  /* not yet running */
-    sfx_step = (uint32_t)(((double)(samples[0].rate ? samples[0].rate : 8333) / out_rate)
-                          * 65536.0 + 0.5);
-    tick_left = out_rate / MUSIC_HZ;
+    for (int i = 0; i < SFX_COUNT; i++)
+        samples[i].step = (uint32_t)(((uint64_t)samples[i].rate << 16) / (uint64_t)out_rate);
+    tick_left = out_rate / TIMER_HZ;
     SDL_PauseAudio(0);
     return true;
+}
+
+void sound_quit(void)
+{
+    if (opened) SDL_CloseAudio();
+    opened = false;
+    memset(samples, 0, sizeof samples);
+    sp_asset_release(&blaster);
+    music_free();
 }
 
 void sound_music(int song)
@@ -226,11 +198,11 @@ void sound_music(int song)
     SDL_UnlockAudio();
 }
 
-bool sound_has_effects(void) { return opened && samples[SFX_EXIT].raw != NULL; }
+bool sound_has_effects(void) { return opened && samples[SFX_EXIT].pcm != NULL; }
 
 void sp_sound_play(int fx)
 {
-    if (!opened || fx < 0 || fx >= SFX_COUNT || !samples[fx].raw) return;
+    if (!opened || fx < 0 || fx >= SFX_COUNT || !samples[fx].pcm) return;
     SDL_LockAudio();
     if (sfx_prio < RULE[fx].gate) {
         sfx_prio = RULE[fx].prio;
@@ -243,11 +215,10 @@ void sp_sound_play(int fx)
     SDL_UnlockAudio();
 }
 
-void sound_quit(void)
+void sound_stats(SoundStats *out, bool reset)
 {
-    if (opened) SDL_CloseAudio();
-    opened = false;
-    memset(samples, 0, sizeof samples);
-    sp_asset_release(&fx_asset);
-    music_free();
+    SDL_LockAudio();
+    *out = *(const SoundStats *)&stats;
+    if (reset) memset((void *)&stats, 0, sizeof stats);
+    SDL_UnlockAudio();
 }

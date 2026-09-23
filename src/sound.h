@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* Effect numbers are the values the game passes to the sound driver
- * (INT 81h, AH=0, AL=effect); they index SAMPLE.SND's table directly. */
+ * (INT 81h, AH=0, AL=effect); they index BLASTER.SND's table of VOC files. */
 enum {
     SFX_EXPLODE = 0,   /* FUN_46c2_37c1  */
     SFX_INFOTRON = 1,  /* FUN_46c2_6d20  */
@@ -24,7 +24,7 @@ bool sound_init(const char *datadir, bool music);
 void sound_stats(SoundStats *out, bool reset);
 void sound_quit(void);
 void sp_sound_play(int fx);        /* no-op when audio is unavailable */
-bool sound_has_effects(void);      /* the digitised exit fanfare exists */
+bool sound_has_effects(void);      /* BLASTER.SND was found */
 void sound_music(int song);        /* MUSIC_THEME / MUSIC_EXIT, or -1 to stop */
 
 #endif
