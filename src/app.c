@@ -232,7 +232,11 @@ int sp_app_run(const AppConfig *cfg)
                 sp_text_bg(&screen, &gd.chars8, x, VIEW_H / 2 - 4, msg,
                            game.finished ? 2 : 6, 0);
                 if (game.finished) solved[level - 1] = true;
-                if (over == 0 && game.finished) sound_music(MUSIC_EXIT);
+                /* With digitised effects the exit plays its own fanfare and
+                 * stops the music (sound.c); only a copy without any has
+                 * the Adlib driver's jingle, as the pure-Adlib setup does. */
+                if (over == 0 && game.finished && !sound_has_effects())
+                    sound_music(MUSIC_EXIT);
                 if (++over > FPS * 2) {
                     sound_music(MUSIC_THEME);
                     over = 0;

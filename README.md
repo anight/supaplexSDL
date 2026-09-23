@@ -15,7 +15,7 @@ its data files into a directory — `orig/` by default:
 orig/
   FIXED.DAT  MOVING.DAT  PANEL.DAT  PALETTES.DAT  LEVELS.DAT  LEVEL.LST
   TITLE.DAT  TITLE1.DAT  TITLE2.DAT MENU.DAT  BACK.DAT  GFX.DAT  CONTROLS.DAT
-  CHARS6.DAT CHARS8.DAT  SAMPLE.SND  ADLIB.SND  SUPAPLEX.CFG
+  CHARS6.DAT CHARS8.DAT  BLASTER.SND SAMPLE.SND  ADLIB.SND  SUPAPLEX.CFG
   DEMO0.BIN ... DEMO9.BIN            (only for --replay)
 ```
 
@@ -390,6 +390,38 @@ That yields seven effects, and the call sites in the game name them:
 picosupaplex decodes them at load time and plays them through SDL2 audio, one
 at a time as the original does. `re/out/sfx/` holds them as WAV files.
 
+### Which set is played, and when
+
+The shipped `SUPAPLEX.CFG` selects the Sound Blaster, and with it the game
+plays its effects from `BLASTER.SND`, not `SAMPLE.SND`. That file is Creative's
+CT-VOICE driver with seven Creative Voice Files appended; a word table at
+`0x8fa8` holds their offsets, and the play routine skips each file's header by
+its own header-size field at `+0x14`. Each is one type-1 block of **8-bit
+unsigned PCM at 8333 Hz** — the same seven sounds, cleanly: centred on 128,
+where the speaker set sits on a large DC offset (its values run 0–60, mean
+about 34) that clicks at every start and stop, and is otherwise a PWM duty
+approximation made for a paper cone to smooth. Played through a DAC the
+speaker set is harsh, so supaplexSDL uses the Blaster set and falls back to
+the speaker one only if `BLASTER.SND` is missing.
+
+An effect does not simply cut off whatever is playing. Every trigger
+(46c2:6cb7…6ec4) checks a priority byte at `DS:9579` against a gate, and if it
+passes sets the priority and a hold time at `DS:957b`, which the 50 Hz timer
+interrupt counts down (46c2:0782) before clearing the priority:
+
+| effect | plays if priority below | sets priority | holds (50 Hz ticks) |
+|---|---|---|---|
+| explosion | 5 | 5 | 15 |
+| infotron | 5 | 4 | 15 |
+| push, land | 2 | 2 | 7 |
+| bug | 3 | 3 | 3 |
+| base eaten | 1 | 1 | 3 |
+| exit | always | 10 | 250 |
+
+Reaching the exit (46c2:6f2d) also stops the music and plays effect 6 in its
+place. The Adlib driver's own jingle, song 1, is what the pure-Adlib setup
+plays there instead; supaplexSDL uses it only if it has no digitised effects.
+
 ## Music
 
 The music is Adlib (OPL2), not MIDI, and it lives in `ADLIB.SND` — one of the
@@ -544,12 +576,12 @@ the start screens (title fade and credits), the Adlib music, and a level-select
 front end on the original menu artwork.
 
 **Not implemented**: the driver's own Adlib sound effects (`AH=4`) — the
-digitised ones from `SAMPLE.SND` are used instead — and Supaplex's own menu system — player records (`PLAYER.LST`),
+digitised ones from `BLASTER.SND` are used instead — and Supaplex's own menu system — player records (`PLAYER.LST`),
 the hall of fame (`HALLFAME.LST`), rankings, statistics, the gfx-tutor and
 controls screens — and the level-start pan. picosupaplex substitutes a plain
 level-select screen for these. Red-disk detonation timers are still a stub, and
 the Adlib / Roland / SoundBlaster drivers are not used (the digitised effects
-from `SAMPLE.SND` are).
+from `BLASTER.SND` are).
 
 ## Repository layout
 
