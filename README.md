@@ -47,6 +47,18 @@ menu artwork. Any key skips a start screen; `Esc` skips straight to the menu.
 | `F2` / `F3` | Previous / next level |
 | `Esc` | Back to the level list, or quit from it |
 
+A game controller works too: stick or D-pad to move and to choose, A to snap
+(and to confirm), B or Start to leave a level, Back to restart it.
+
+## Other platforms
+
+The same source builds against [picosdl](https://github.com/anight/picosdl),
+a subset of SDL2 for the Raspberry Pi Pico: see
+[picosupaplex](https://github.com/anight/picosupaplex).  What differs is kept
+behind three seams — the asset layer (`asset.h`, files here and flash tables
+there), the screen (`video.c`) and the loop's entry (`app.c`, which `main.c`
+calls after the command line) — so there is no separate branch of the game.
+
 ## Command line
 
 ```

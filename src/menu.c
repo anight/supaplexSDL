@@ -13,19 +13,21 @@ void menu_init(Menu *m, int level)
     if (m->sel < 0) m->sel = 0;
     if (m->sel >= NUM_LEVELS) m->sel = NUM_LEVELS - 1;
     m->top = m->sel - ROWS / 2;
+    if (m->top > NUM_LEVELS - ROWS) m->top = NUM_LEVELS - ROWS;
+    if (m->top < 0) m->top = 0;
 }
 
-void menu_key(Menu *m, SDL_Keycode k)
+void menu_key(Menu *m, SDL_Scancode k)
 {
     switch (k) {
-    case SDLK_UP:     m->sel--; break;
-    case SDLK_DOWN:   m->sel++; break;
-    case SDLK_PAGEUP: m->sel -= ROWS; break;
-    case SDLK_PAGEDOWN: m->sel += ROWS; break;
-    case SDLK_HOME:   m->sel = 0; break;
-    case SDLK_END:    m->sel = NUM_LEVELS - 1; break;
-    case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: m->play = true; break;
-    case SDLK_ESCAPE: m->quit = true; break;
+    case SDL_SCANCODE_UP:     m->sel--; break;
+    case SDL_SCANCODE_DOWN:   m->sel++; break;
+    case SDL_SCANCODE_PAGEUP: m->sel -= ROWS; break;
+    case SDL_SCANCODE_PAGEDOWN: m->sel += ROWS; break;
+    case SDL_SCANCODE_HOME:   m->sel = 0; break;
+    case SDL_SCANCODE_END:    m->sel = NUM_LEVELS - 1; break;
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: case SDL_SCANCODE_SPACE: m->play = true; break;
+    case SDL_SCANCODE_ESCAPE: m->quit = true; break;
     default: break;
     }
     if (m->sel < 0) m->sel = 0;

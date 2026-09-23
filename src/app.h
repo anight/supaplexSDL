@@ -15,6 +15,10 @@ typedef struct {
  * player quits (never, on a board). */
 int  sp_app_run(const AppConfig *cfg);
 
+/* Called once a frame after the present, if set: a board uses it to report
+ * on itself without the game knowing anything about the board. */
+extern void (*sp_app_frame_hook)(void);
+
 /* SUPAPLEX.CFG is four lower-case bytes; the third is "m" for music on and
  * "n" for off (SPFIX62.DOC).  The shipped file says "bkmx". */
 bool sp_cfg_music(const char *dir);

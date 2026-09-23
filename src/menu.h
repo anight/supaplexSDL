@@ -13,7 +13,7 @@ typedef struct {
 } Menu;
 
 void menu_init(Menu *m, int level);
-void menu_key(Menu *m, SDL_Keycode k);
+void menu_key(Menu *m, SDL_Scancode k);
 void menu_draw(const Menu *m, const GameData *gd, Image *screen,
                const bool *solved);
 

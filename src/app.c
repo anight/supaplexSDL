@@ -24,6 +24,8 @@
 #define REPEAT_1  12                /* frames before a held direction repeats */
 #define REPEAT_N  4                 /* and between repeats after that        */
 
+void (*sp_app_frame_hook)(void);
+
 static GameData gd;
 static Game     game;
 static Level    level_buf;
@@ -99,13 +101,13 @@ static void pad_poll(Pad *p)
 }
 
 /* a direction as a menu keypress: once, then repeating while held */
-static SDL_Keycode pad_menu_key(const Pad *p)
+static SDL_Scancode pad_menu_key(const Pad *p)
 {
-    static const SDL_Keycode K[5] = { 0, SDLK_UP, SDLK_LEFT, SDLK_DOWN, SDLK_RIGHT };
-    if (p->dir == DIR_NONE) return 0;
+    static const SDL_Scancode K[5] = { SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_UP, SDL_SCANCODE_LEFT, SDL_SCANCODE_DOWN, SDL_SCANCODE_RIGHT };
+    if (p->dir == DIR_NONE) return SDL_SCANCODE_UNKNOWN;
     if (p->held == 0) return K[p->dir];
     if (p->held >= REPEAT_1 && (p->held - REPEAT_1) % REPEAT_N == 0) return K[p->dir];
-    return 0;
+    return SDL_SCANCODE_UNKNOWN;
 }
 
 #define PRESSED(p, f) ((p)->f && !(p)->f##_prev)
@@ -157,29 +159,29 @@ int sp_app_run(const AppConfig *cfg)
     int over = 0;
     uint32_t next = SDL_GetTicks();
     while (running) {
-        /* Keys and pad presses both arrive here as keycodes, so the three
+        /* Keys and pad presses both arrive here as scancodes, so the three
          * screens handle one kind of input. */
-        SDL_Keycode keys[16]; int nk = 0;
+        SDL_Scancode keys[16]; int nk = 0;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
-            if (e.type == SDL_KEYDOWN && nk < 16) keys[nk++] = e.key.keysym.sym;
+            if (e.type == SDL_KEYDOWN && nk < 16) keys[nk++] = e.key.keysym.scancode;
             if (e.type == SDL_CONTROLLERDEVICEADDED && !pad.pad) pad_open(&pad);
         }
         pad_poll(&pad);
         if (state != ST_PLAY) {
-            SDL_Keycode k = pad_menu_key(&pad);
+            SDL_Scancode k = pad_menu_key(&pad);
             if (k && nk < 16) keys[nk++] = k;
-            if ((PRESSED(&pad, a) || PRESSED(&pad, start)) && nk < 16) keys[nk++] = SDLK_RETURN;
+            if ((PRESSED(&pad, a) || PRESSED(&pad, start)) && nk < 16) keys[nk++] = SDL_SCANCODE_RETURN;
         } else {
-            if ((PRESSED(&pad, b) || PRESSED(&pad, start)) && nk < 16) keys[nk++] = SDLK_ESCAPE;
-            if (PRESSED(&pad, back) && nk < 16) keys[nk++] = SDLK_r;
+            if ((PRESSED(&pad, b) || PRESSED(&pad, start)) && nk < 16) keys[nk++] = SDL_SCANCODE_ESCAPE;
+            if (PRESSED(&pad, back) && nk < 16) keys[nk++] = SDL_SCANCODE_R;
         }
 
         for (int i = 0; i < nk; i++) {
-            SDL_Keycode k = keys[i];
+            SDL_Scancode k = keys[i];
             if (state == ST_TITLE) {
-                if (k == SDLK_ESCAPE) title.done = true;
+                if (k == SDL_SCANCODE_ESCAPE) title.done = true;
                 else title_key(&title);
                 if (title.done) { state = ST_MENU; menu_init(&menu, level); }
             } else if (state == ST_MENU) {
@@ -195,10 +197,10 @@ int sp_app_run(const AppConfig *cfg)
                     over = 0; state = ST_PLAY;
                 }
             } else {
-                if (k == SDLK_ESCAPE) { state = ST_MENU; menu_init(&menu, level); }
-                if (k == SDLK_r) { start_level(level, player); over = 0; }
-                if (k == SDLK_F2 && level > 1) { level--; start_level(level, player); over = 0; }
-                if (k == SDLK_F3 && level < gd.n_levels) { level++; start_level(level, player); over = 0; }
+                if (k == SDL_SCANCODE_ESCAPE) { state = ST_MENU; menu_init(&menu, level); }
+                if (k == SDL_SCANCODE_R) { start_level(level, player); over = 0; }
+                if (k == SDL_SCANCODE_F2 && level > 1) { level--; start_level(level, player); over = 0; }
+                if (k == SDL_SCANCODE_F3 && level < gd.n_levels) { level++; start_level(level, player); over = 0; }
             }
         }
 
@@ -242,6 +244,7 @@ int sp_app_run(const AppConfig *cfg)
         }
 
         video_present(&screen, pal);
+        if (sp_app_frame_hook) sp_app_frame_hook();
 
         next += 1000 / FPS;
         int32_t wait = (int32_t)(next - SDL_GetTicks());
